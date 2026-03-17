@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+env/
+
+# 环境配置
+.env
+*.env
+
+# Cookie 文件（敏感信息）
+bilibili_cookies.txt
+douyin_cookies.txt
+*_cookies.txt
+
+# 下载文件
+downloads/
+*.mp4
+*.m4a
+*.m4s
+
+# 测试结果（可选）
+bilibili_result.json
+bilibili_user_*_result.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# Git 子模块
+Star-Office-UI/
+projects/bilibili-video-data/
+skills/
+word-book/
+word/
+taobao-crawler/

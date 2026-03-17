@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  bilibili-api:
+    build: .
+    container_name: coze-bilibili-api
+    ports:
+      - "${API_PORT:-8001}:8000"
+    environment:
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+      - DEBUG=${DEBUG:-false}
+      - API_KEY=${API_KEY:-}
+      - DOWNLOAD_DIR=/tmp/bilibili_downloads
+      - DOWNLOAD_TIMEOUT=600
+      - COOKIES_FILE=/cookies/bilibili_cookies.txt
+      - LOG_LEVEL=INFO
+      - COZE_WEBHOOK_ENABLED=true
+    volumes:
+      - ./downloads:/tmp/bilibili_downloads
+      - ${COOKIES_FILE:-./bilibili_cookies.txt}:/cookies/bilibili_cookies.txt:ro
+    restart: unless-stopped
+    networks:
+      - bilibili-network
+
+networks:
+  bilibili-network:
+    driver: bridge
