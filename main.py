@@ -26,6 +26,41 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+def format_duration_string(duration_str: str, duration_sec: Optional[int] = None) -> str:
+    """
+    格式化视频时长字符串
+    处理 yt-dlp 返回的时长格式，确保少于 1 分钟的视频显示为 "0:XX" 格式
+    
+    Args:
+        duration_str: yt-dlp 返回的 duration_string
+        duration_sec: 可选的秒数（用于从秒数转换）
+    
+    Returns:
+        格式化后的时长字符串（如 "0:36", "3:46", "25:40"）
+    """
+    if not duration_str:
+        if duration_sec is not None:
+            # 从秒数转换
+            minutes = duration_sec // 60
+            seconds = duration_sec % 60
+            return f"{minutes}:{seconds:02d}"
+        return ""
+    
+    # 检查是否只有秒数（没有冒号）
+    if ':' not in duration_str:
+        try:
+            seconds = int(float(duration_str))
+            minutes = seconds // 60
+            secs = seconds % 60
+            return f"{minutes}:{secs:02d}"
+        except (ValueError, TypeError):
+            return duration_str
+    
+    # 已有冒号，直接返回
+    return duration_str
+
+
 app = FastAPI(
     title="Coze Bilibili Uploader API",
     description="B 站 UP 主信息爬取 API 服务 - 获取 UP 主信息、视频列表、视频详情",
@@ -319,7 +354,7 @@ async def get_video_info(request: VideoInfoRequest):
         "uploader_id": info.get("uploader_id", ""),
         "url": info.get("webpage_url", ""),
         "duration": info.get("duration", 0),
-        "duration_string": info.get("duration_string", ""),
+        "duration_string": format_duration_string(info.get("duration_string", ""), info.get("duration")),
         "upload_date": info.get("upload_date", ""),
         "view_count": info.get("view_count", 0),
         "like_count": info.get("like_count", 0),
@@ -432,7 +467,7 @@ async def coze_webhook(request: CozeWebhookRequest):
                 "platform": detected_platform,
                 "title": info.get("title", ""),
                 "author": info.get("uploader", "") if detected_platform == "douyin" else info.get("uploader", ""),
-                "duration": info.get("duration_string", ""),
+                "duration": format_duration_string(info.get("duration_string", ""), info.get("duration")),
                 "view_count": info.get("view_count", 0),
                 "like_count": info.get("like_count", 0),
                 "url": info.get("webpage_url", ""),
@@ -589,18 +624,18 @@ async def get_uploader_info(request: UploaderInfoRequest):
     
     **功能**:
     1. 获取 UP 主基本信息（名称、UID 等）
-    2. 获取 UP 主视频列表
+    2. 获取 UP 主视频列表（含封面图）
     3. 获取每个视频的详细信息（播放量、点赞数等）
     
     **适用于 Coze API 调用**
     """
     logger.info(f"Getting uploader info: {request.uploader_url}, max_videos: {request.max_videos}")
     
-    # 1. 获取 UP 主信息（单个视频即可获取 UP 主信息）
+    # 1. 获取视频列表（不使用 flat-playlist，直接获取完整信息）
     output = run_yt_dlp_api(
         request.uploader_url,
         request.cookie,
-        ["--playlist-end", "1"]
+        ["--playlist-end", str(request.max_videos)]
     )
     
     if not output or isinstance(output, dict) and "error" in output:
@@ -609,45 +644,46 @@ async def get_uploader_info(request: UploaderInfoRequest):
             error=output.get("error", "Unknown error") if isinstance(output, dict) else "Unknown error"
         )
     
-    try:
-        data = json.loads(output.strip())
-        uploader_info = {
-            "uploader": data.get("uploader", ""),
-            "uploader_id": data.get("uploader_id", ""),
-            "url": request.uploader_url,
-        }
-    except json.JSONDecodeError as e:
-        return UploaderInfoResponse(
-            success=False,
-            error=f"JSON decode error: {str(e)}"
-        )
-    
-    # 2. 获取视频列表
-    output = run_yt_dlp_api(
-        request.uploader_url,
-        request.cookie,
-        ["--playlist-end", str(request.max_videos), "--flat-playlist"]
-    )
-    
-    if not output or isinstance(output, dict) and "error" in output:
-        return UploaderInfoResponse(
-            success=False,
-            error=output.get("error", "Unknown error") if isinstance(output, dict) else "Unknown error"
-        )
-    
+    # 解析多行 JSON（每行一个视频）
     videos = []
+    uploader_info = None
+    logger.info(f"Raw output lines: {len(output.strip().split(chr(10))) if output else 0}")
     for line in output.strip().split('\n'):
         if line.strip():
             try:
                 entry = json.loads(line)
+                logger.info(f"Parsed entry: id={entry.get('id')}, title={entry.get('title', '')[:30] if entry.get('title') else 'EMPTY'}")
+                
+                # 跳过播放列表信息行（没有 id 字段）
+                if not entry.get("id"):
+                    logger.info("Skipping entry without id")
+                    continue
+                
+                # 从第一个视频提取 UP 主信息
+                if uploader_info is None:
+                    uploader_info = {
+                        "uploader": entry.get("uploader", ""),
+                        "uploader_id": entry.get("uploader_id", ""),
+                        "url": request.uploader_url,
+                    }
+                
                 videos.append({
                     "index": len(videos) + 1,
                     "title": entry.get("title", ""),
                     "id": entry.get("id", ""),
                     "url": f"https://www.bilibili.com/video/{entry.get('id', '')}",
+                    "thumbnail": entry.get("thumbnail", ""),
+                    "duration_string": format_duration_string(entry.get("duration_string", ""), entry.get("duration")),
                 })
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as e:
+                logger.error(f"JSON decode error: {e}")
                 continue
+    
+    if not uploader_info:
+        return UploaderInfoResponse(
+            success=False,
+            error="Failed to get uploader info"
+        )
     
     result = {
         "uploader_info": uploader_info,
@@ -655,13 +691,13 @@ async def get_uploader_info(request: UploaderInfoRequest):
         "video_count": len(videos),
     }
     
-    # 3. 获取视频详情（如果需要）
+    # 2. 获取视频详情（如果需要）
     if request.get_details and videos:
         video_details = []
         for video in videos:
             output = run_yt_dlp_api(video["url"], request.cookie)
             
-            if output and not isinstance(output, dict) or not output.get("error"):
+            if output and not isinstance(output, dict) or not (isinstance(output, dict) and output.get("error")):
                 try:
                     if isinstance(output, dict):
                         continue
@@ -670,12 +706,14 @@ async def get_uploader_info(request: UploaderInfoRequest):
                         "title": detail.get("title", ""),
                         "id": detail.get("id", ""),
                         "url": detail.get("webpage_url", ""),
-                        "duration_string": detail.get("duration_string", ""),
+                        "thumbnail": detail.get("thumbnail", ""),
+                        "duration_string": format_duration_string(detail.get("duration_string", ""), detail.get("duration")),
                         "view_count": detail.get("view_count", 0),
                         "like_count": detail.get("like_count", 0),
                         "comment_count": detail.get("comment_count", 0),
                         "upload_date": detail.get("upload_date", ""),
                         "tags": detail.get("tags", []),
+                        "description": detail.get("description", ""),
                     })
                 except json.JSONDecodeError:
                     continue
