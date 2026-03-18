@@ -10,6 +10,8 @@ import logging
 import subprocess
 import tempfile
 import shutil
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 from fastapi import FastAPI, HTTPException, Header, BackgroundTasks
@@ -59,6 +61,51 @@ def format_duration_string(duration_str: str, duration_sec: Optional[int] = None
     
     # 已有冒号，直接返回
     return duration_str
+
+
+def fetch_video_detail_wrapper(url: str, cookie: Optional[str]) -> Optional[Dict]:
+    """
+    获取单个视频详情的包装函数（用于并行执行）
+    
+    Args:
+        url: 视频 URL
+        cookie: Cookie 字符串
+    
+    Returns:
+        视频详情字典，失败返回 None
+    """
+    try:
+        output = run_yt_dlp_api(url, cookie)
+        if output and not isinstance(output, dict):
+            return json.loads(output.strip())
+        return None
+    except Exception as e:
+        logger.error(f"Error fetching video {url}: {e}")
+        return None
+
+
+async def get_video_details_parallel(video_urls: List[str], cookie: Optional[str], max_concurrent: int = 10) -> List[Optional[Dict]]:
+    """
+    并行获取多个视频详情
+    
+    Args:
+        video_urls: 视频 URL 列表
+        cookie: Cookie 字符串
+        max_concurrent: 最大并发数（默认 10，不限流）
+    
+    Returns:
+        视频详情列表
+    """
+    loop = asyncio.get_event_loop()
+    
+    with ThreadPoolExecutor(max_workers=max_concurrent) as executor:
+        tasks = [
+            loop.run_in_executor(executor, fetch_video_detail_wrapper, url, cookie)
+            for url in video_urls
+        ]
+        results = await asyncio.gather(*tasks)
+    
+    return list(results)
 
 
 app = FastAPI(
@@ -618,7 +665,7 @@ def run_yt_dlp_api(url: str, cookie: Optional[str] = None, extra_args: List[str]
 
 
 @app.post("/api/uploader/info", response_model=UploaderInfoResponse)
-async def get_uploader_info(request: UploaderInfoRequest):
+def get_uploader_info(request: UploaderInfoRequest):
     """
     获取 B 站 UP 主主页信息及视频详情
     
@@ -691,17 +738,25 @@ async def get_uploader_info(request: UploaderInfoRequest):
         "video_count": len(videos),
     }
     
-    # 2. 获取视频详情（如果需要）
+    # 2. 获取视频详情（如果需要）- 并行处理
     if request.get_details and videos:
+        logger.info(f"Fetching details for {len(videos)} videos in parallel...")
+        
+        # 提取视频 URL 列表
+        video_urls = [video["url"] for video in videos]
+        
+        # 并行获取视频详情（使用 asyncio.new_event_loop() 避免与 FastAPI 的事件循环冲突）
+        loop = asyncio.new_event_loop()
+        try:
+            video_details_results = loop.run_until_complete(get_video_details_parallel(video_urls, request.cookie, max_concurrent=10))
+        finally:
+            loop.close()
+        
+        # 处理结果
         video_details = []
-        for video in videos:
-            output = run_yt_dlp_api(video["url"], request.cookie)
-            
-            if output and not isinstance(output, dict) or not (isinstance(output, dict) and output.get("error")):
+        for i, detail in enumerate(video_details_results):
+            if detail:
                 try:
-                    if isinstance(output, dict):
-                        continue
-                    detail = json.loads(output.strip())
                     video_details.append({
                         "title": detail.get("title", ""),
                         "id": detail.get("id", ""),
@@ -715,11 +770,13 @@ async def get_uploader_info(request: UploaderInfoRequest):
                         "tags": detail.get("tags", []),
                         "description": detail.get("description", ""),
                     })
-                except json.JSONDecodeError:
+                except (json.JSONDecodeError, KeyError) as e:
+                    logger.error(f"Error processing video {i+1}: {e}")
                     continue
         
         result["video_details"] = video_details
         result["details_count"] = len(video_details)
+        logger.info(f"Successfully fetched {len(video_details)}/{len(videos)} video details")
     
     return UploaderInfoResponse(
         success=True,
