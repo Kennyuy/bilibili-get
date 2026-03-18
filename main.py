@@ -748,7 +748,7 @@ def get_uploader_info(request: UploaderInfoRequest):
         # 并行获取视频详情（使用 asyncio.new_event_loop() 避免与 FastAPI 的事件循环冲突）
         loop = asyncio.new_event_loop()
         try:
-            video_details_results = loop.run_until_complete(get_video_details_parallel(video_urls, request.cookie, max_concurrent=10))
+            video_details_results = loop.run_until_complete(get_video_details_parallel(video_urls, request.cookie, max_concurrent=5))
         finally:
             loop.close()
         
